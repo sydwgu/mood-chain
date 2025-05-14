@@ -1,4 +1,5 @@
-# if needed, run the following in terminal to install required packages: pip install sounddevice scipy torchaudio torch transformers
+# If needed, run:
+#   pip install sounddevice scipy torchaudio torch transformers soundfile
 
 import sounddevice as sd
 import numpy as np
@@ -7,97 +8,185 @@ import torch
 import torchaudio
 from scipy.io.wavfile import write
 from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+import os
 
-# global variable to track previous speaker's predicited emotion
-last_emotion = None
 
-# open source emotion processing model from HuggingFace
+THRESHOLD = 0.0005           # Lower threshold to ensure normal speech is detected
+SILENCE_DURATION = 5.0       # Stop recording if we have this many seconds of silence after talking
+SAMPLE_RATE = 16000
+CHANNELS = 1                 # Use 1 channel (mono)
+OUTPUT_DIR = "./recordings"
+DURATION_LIMIT = 60          # Hard stop after 60 seconds
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Load the Hugging Face Whisper-based audio classification model
 model_name = "firdhokk/speech-emotion-recognition-with-openai-whisper-large-v3"
 extractor = AutoFeatureExtractor.from_pretrained(model_name)
 model = AutoModelForAudioClassification.from_pretrained(model_name)
 
-# configure recording settings
-THRESHOLD = 0.02         # adjust noise threshold based on environment
-SILENCE_DURATION = 5.0   # seconds
-SAMPLE_RATE = 16000      # hz
-CHANNELS = 1
-OUTPUT_DIR = "./recordings"
-DURATION_LIMIT = 60      # max recording length
+# Track the last predicted emotion (if you want to use it somewhere else)
+last_emotion = None
 
-import os
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-def rms(data):
+def rms(data: np.ndarray) -> float:
+    """Compute the RMS volume of the incoming audio chunk."""
     return np.sqrt(np.mean(np.square(data)))
 
-# continuously record and save live audio clips
-def record_until_silence():
-    print("Listening for speech...")
-    recording = []
+def record_until_silence() -> np.ndarray:
+    """
+    Continuously records from the mic until:
+      (a) We detect THRESHOLD crossing (start), then
+      (b) We detect SILENCE_DURATION of silence (stop), or
+      (c) We hit DURATION_LIMIT.
+
+    Returns the recorded audio as a NumPy float32 array.
+    """
+    print("\nListening for speech...")
+    recording_chunks = []
     started = False
     silence_start = None
     start_time = time.time()
 
-    def callback(indata, frames, time_info, status):
-        nonlocal recording, started, silence_start, start_time
+    def audio_callback(indata, frames, time_info, status):
+        nonlocal recording_chunks, started, silence_start, start_time
 
+        if status:
+            print(f"[DEBUG] Sounddevice status: {status}")
+
+        # Compute volume of current chunk
         volume = rms(indata)
+        print(f"[DEBUG] Callback volume={volume:.6f}, threshold={THRESHOLD}, indata.shape={indata.shape}")
+
+        # Check if above threshold => speaking
         if volume > THRESHOLD:
             if not started:
-                print("Speech detected, recording...")
+                print("Speech detected. Recording...")
                 started = True
             silence_start = None
-        elif started:
-            if silence_start is None:
-                silence_start = time.time()
-            elif time.time() - silence_start > SILENCE_DURATION:
-                print("Silence detected, stopping recording.")
-                raise sd.CallbackStop()
+        else:
+            # We're below threshold
+            if started:
+                # If we've started before, check for silence
+                if silence_start is None:
+                    silence_start = time.time()
+                elif time.time() - silence_start > SILENCE_DURATION:
+                    print("Silence detected. Stopping recording.")
+                    raise sd.CallbackStop()
 
+        # If we have started, append the current chunk
         if started:
-            recording.append(indata.copy())
+            recording_chunks.append(indata.copy())
 
-        if time.time() - start_time > DURATION_LIMIT:
-            print("Max duration reached, stopping.")
+        # Safety check: stop if we exceed max duration
+        if (time.time() - start_time) > DURATION_LIMIT:
+            print("Max duration reached. Stopping recording.")
             raise sd.CallbackStop()
 
-    with sd.InputStream(callback=callback, samplerate=SAMPLE_RATE, channels=CHANNELS):
+    # Open an input stream
+    with sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=CHANNELS,
+        callback=audio_callback
+    ):
         try:
+            # Let the callback run until it raises CallbackStop
             sd.sleep(int(DURATION_LIMIT * 1000))
         except sd.CallbackStop:
             pass
 
-    audio = np.concatenate(recording, axis=0)
-    return audio
+    # If we never recorded anything
+    if not recording_chunks:
+        print("[DEBUG] No audio data captured.")
+        return np.array([], dtype=np.float32)
 
-# save recorded audio filie to machine
-def save_audio(audio, filename):
-    write(filename, SAMPLE_RATE, (audio * 32767).astype(np.int16))
+    # Concatenate all chunks
+    audio_data = np.concatenate(recording_chunks, axis=0)
+    print(f"[DEBUG] Final audio shape from record_until_silence: {audio_data.shape}")
+    return audio_data
 
-# run HuggingFace emotion classification model
+def save_audio(audio: np.ndarray, filename: str):
+    """Save float32 audio in [-1,1] range to a 16-bit WAV."""
+    if audio.size == 0:
+        print("[DEBUG] Audio is empty, skipping save.")
+        return
+
+    # Convert float32 samples to int16
+    scaled = (audio * 32767).astype(np.int16)
+    write(filename, SAMPLE_RATE, scaled)
+    print(f"Saved: {filename}")
+
 def classify_emotion(filepath, extractor, model):
-    waveform, sr = torchaudio.load(filepath)
-    if sr != extractor.sampling_rate:
-        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=extractor.sampling_rate)
-        waveform = resampler(waveform)
+    """
+    Classify emotion using a Hugging Face Whisper-based model.
+    Returns None if the audio is too short or has invalid shape.
+    """
 
-    inputs = extractor(waveform, sampling_rate=extractor.sampling_rate, return_tensors="pt")
+    waveform, sr = torchaudio.load(filepath)
+    print(f"[DEBUG] Loaded '{filepath}'. Initial shape={waveform.shape}, sr={sr}")
+
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+        print(f"[DEBUG] Downmixed shape={waveform.shape}")
+
+    if waveform.shape[-1] == 0:
+        print("[DEBUG] Waveform has 0 samples. Skipping classification.")
+        return None
+
+    if waveform.shape[-1] < 1000:
+        print(f"[DEBUG] Waveform too short ({waveform.shape[-1]} samples). Skipping.")
+        return None
+
+    if sr != extractor.sampling_rate:
+        resampler = torchaudio.transforms.Resample(sr, extractor.sampling_rate)
+        waveform = resampler(waveform)
+        print(f"[DEBUG] After resampling, shape={waveform.shape}")
+
+    print(f"[DEBUG] Final waveform shape before extractor: {waveform.shape}")
+    if waveform.shape[0] != 1:
+        print("[DEBUG] Waveform is not mono after downmix (shape[0] != 1). Skipping.")
+        return None
+    if waveform.shape[-1] == 0:
+        print("[DEBUG] Waveform time dimension is 0. Skipping.")
+        return None
+
+    try:
+        inputs = extractor(
+            waveform,
+            sampling_rate=extractor.sampling_rate,
+            return_tensors="pt"
+        )
+    except ValueError as e:
+        # Catch any final shape/axes errors from the extractor
+        print(f"[DEBUG] Extractor error: {e}")
+        return None
+
     with torch.no_grad():
         logits = model(**inputs).logits
 
     pred_id = torch.argmax(logits, dim=-1).item()
-    return model.config.id2label[pred_id]
+    emotion = model.config.id2label[pred_id]
+    return emotion
 
+######################################################
+# MAIN LOOP
+######################################################
+if __name__ == "__main__":
+    counter = 1
+    while True:
+        audio = record_until_silence()
+        print(f"[DEBUG] record_until_silence() returned shape={audio.shape}")
 
-# live processing loop
-counter = 1
-while True:
-    audio = record_until_silence()
-    filename = os.path.join(OUTPUT_DIR, f"recording_{counter}.wav")
-    save_audio(audio, filename)
-    print(f"Saved: {filename}")
+        if audio.size == 0:
+            print("No audio recorded. Continue listening...\n")
+            continue
 
-    last_emotion = classify_emotion(filename, extractor, model)
-    print(f"Predicted emotion: {last_emotion}")
+        filename = os.path.join(OUTPUT_DIR, f"recording_{counter}.wav")
+        save_audio(audio, filename)
+        predicted_emotion = classify_emotion(filename, extractor, model)
 
-    counter += 1
+        if predicted_emotion is not None:
+            print("Predicted emotion:", predicted_emotion)
+        else:
+            print("No emotion predicted.")
+
+        counter += 1
