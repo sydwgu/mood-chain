@@ -1,5 +1,5 @@
 # If needed, run:
-#   pip install sounddevice scipy torchaudio torch transformers soundfile
+#   pip install sounddevice scipy torchaudio torch transformers soundfile librosa
 
 import sounddevice as sd
 import numpy as np
@@ -9,23 +9,23 @@ import torchaudio
 from scipy.io.wavfile import write
 from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 import os
+import sys
+import librosa
 
-
-THRESHOLD = 0.0005           # Lower threshold to ensure normal speech is detected
-SILENCE_DURATION = 5.0       # Stop recording if we have this many seconds of silence after talking
+THRESHOLD = 0.09
+SILENCE_DURATION = 2.0
 SAMPLE_RATE = 16000
-CHANNELS = 1                 # Use 1 channel (mono)
+CHANNELS = 1
 OUTPUT_DIR = "./recordings"
-DURATION_LIMIT = 60          # Hard stop after 60 seconds
+DURATION_LIMIT = 30
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Load the Hugging Face Whisper-based audio classification model
 model_name = "firdhokk/speech-emotion-recognition-with-openai-whisper-large-v3"
-extractor = AutoFeatureExtractor.from_pretrained(model_name)
+extractor = AutoFeatureExtractor.from_pretrained(model_name)  # do_normalize=True is default in that model config
 model = AutoModelForAudioClassification.from_pretrained(model_name)
 
-# Track the last predicted emotion (if you want to use it somewhere else)
 last_emotion = None
 
 def rms(data: np.ndarray) -> float:
@@ -35,11 +35,10 @@ def rms(data: np.ndarray) -> float:
 def record_until_silence() -> np.ndarray:
     """
     Continuously records from the mic until:
-      (a) We detect THRESHOLD crossing (start), then
-      (b) We detect SILENCE_DURATION of silence (stop), or
-      (c) We hit DURATION_LIMIT.
-
-    Returns the recorded audio as a NumPy float32 array.
+      (a) volume crosses THRESHOLD (start),
+      (b) we get SILENCE_DURATION of silence (stop),
+      (c) or we hit DURATION_LIMIT.
+    Returns the recorded audio as a float32 NumPy array.
     """
     print("\nListening for speech...")
     recording_chunks = []
@@ -48,120 +47,97 @@ def record_until_silence() -> np.ndarray:
     start_time = time.time()
 
     def audio_callback(indata, frames, time_info, status):
-        nonlocal recording_chunks, started, silence_start, start_time
-
-        if status:
-            print(f"[DEBUG] Sounddevice status: {status}")
-
-        # Compute volume of current chunk
+        nonlocal started, silence_start
         volume = rms(indata)
-        print(f"[DEBUG] Callback volume={volume:.6f}, threshold={THRESHOLD}, indata.shape={indata.shape}")
+        print(f"volume={volume:.4f}, threshold={THRESHOLD:.4f}, started={started}")
 
-        # Check if above threshold => speaking
         if volume > THRESHOLD:
             if not started:
-                print("Speech detected. Recording...")
                 started = True
+                print("Speech detected => started recording.")
             silence_start = None
         else:
-            # We're below threshold
             if started:
-                # If we've started before, check for silence
                 if silence_start is None:
                     silence_start = time.time()
-                elif time.time() - silence_start > SILENCE_DURATION:
-                    print("Silence detected. Stopping recording.")
-                    raise sd.CallbackStop()
+                    print("Silence started now.")
+                else:
+                    elapsed_silence = time.time() - silence_start
+                    print(f"Silence for {elapsed_silence:.2f}s (need {SILENCE_DURATION}s).")
+                    if elapsed_silence >= SILENCE_DURATION:
+                        print("Enough silence => stopping.")
+                        raise sd.CallbackStop()
 
-        # If we have started, append the current chunk
         if started:
             recording_chunks.append(indata.copy())
 
-        # Safety check: stop if we exceed max duration
+        # Overall duration limit
         if (time.time() - start_time) > DURATION_LIMIT:
-            print("Max duration reached. Stopping recording.")
+            print("Max duration reached => stopping.")
             raise sd.CallbackStop()
 
-    # Open an input stream
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
-        callback=audio_callback
-    ):
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, callback=audio_callback):
         try:
-            # Let the callback run until it raises CallbackStop
             sd.sleep(int(DURATION_LIMIT * 1000))
         except sd.CallbackStop:
             pass
 
-    # If we never recorded anything
     if not recording_chunks:
         print("[DEBUG] No audio data captured.")
         return np.array([], dtype=np.float32)
 
-    # Concatenate all chunks
     audio_data = np.concatenate(recording_chunks, axis=0)
-    print(f"[DEBUG] Final audio shape from record_until_silence: {audio_data.shape}")
+    print(f"[DEBUG] Final audio shape: {audio_data.shape}")
     return audio_data
 
 def save_audio(audio: np.ndarray, filename: str):
-    """Save float32 audio in [-1,1] range to a 16-bit WAV."""
+    """Save float32 audio in [-1,1] to a 16-bit WAV."""
     if audio.size == 0:
         print("[DEBUG] Audio is empty, skipping save.")
         return
-
-    # Convert float32 samples to int16
     scaled = (audio * 32767).astype(np.int16)
     write(filename, SAMPLE_RATE, scaled)
     print(f"Saved: {filename}")
 
-def classify_emotion(filepath, extractor, model):
+def classify_emotion(filepath, extractor, model, max_duration=30.0):
     """
-    Classify emotion using a Hugging Face Whisper-based model.
-    Returns None if the audio is too short or has invalid shape.
+    Classify emotion using the same approach as your 'working' snippet:
+    1) Load with librosa at extractor.sampling_rate
+    2) Pad or truncate to max_duration
+    3) Use extractor(...) with truncation=True
+    4) Forward pass through the model
     """
 
-    waveform, sr = torchaudio.load(filepath)
-    print(f"[DEBUG] Loaded '{filepath}'. Initial shape={waveform.shape}, sr={sr}")
+    # 1. Load with librosa at the model's sampling rate
+    audio_array, sr = librosa.load(filepath, sr=extractor.sampling_rate)
 
-    if waveform.shape[0] > 1:
-        waveform = torch.mean(waveform, dim=0, keepdim=True)
-        print(f"[DEBUG] Downmixed shape={waveform.shape}")
+    # 2. Pad or truncate to max_duration
+    max_length = int(extractor.sampling_rate * max_duration)
+    if len(audio_array) > max_length:
+        audio_array = audio_array[:max_length]
+    else:
+        # pad at the end with zeros
+        audio_array = np.pad(audio_array, (0, max_length - len(audio_array)))
 
-    if waveform.shape[-1] == 0:
-        print("[DEBUG] Waveform has 0 samples. Skipping classification.")
-        return None
+    # 3. Prepare inputs for the model
+    #    (The 'working' code used feature_extractor(..., max_length=..., truncation=True))
+    inputs = extractor(
+        audio_array,
+        sampling_rate=extractor.sampling_rate,
+        max_length=max_length,
+        truncation=True,
+        return_tensors="pt",
+    )
 
-    if waveform.shape[-1] < 1000:
-        print(f"[DEBUG] Waveform too short ({waveform.shape[-1]} samples). Skipping.")
-        return None
+    # 4. Move to CPU or GPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    if sr != extractor.sampling_rate:
-        resampler = torchaudio.transforms.Resample(sr, extractor.sampling_rate)
-        waveform = resampler(waveform)
-        print(f"[DEBUG] After resampling, shape={waveform.shape}")
-
-    print(f"[DEBUG] Final waveform shape before extractor: {waveform.shape}")
-    if waveform.shape[0] != 1:
-        print("[DEBUG] Waveform is not mono after downmix (shape[0] != 1). Skipping.")
-        return None
-    if waveform.shape[-1] == 0:
-        print("[DEBUG] Waveform time dimension is 0. Skipping.")
-        return None
-
-    try:
-        inputs = extractor(
-            waveform,
-            sampling_rate=extractor.sampling_rate,
-            return_tensors="pt"
-        )
-    except ValueError as e:
-        # Catch any final shape/axes errors from the extractor
-        print(f"[DEBUG] Extractor error: {e}")
-        return None
-
+    # 5. Forward pass
     with torch.no_grad():
-        logits = model(**inputs).logits
+        outputs = model(**inputs)
+        logits = outputs.logits
 
     pred_id = torch.argmax(logits, dim=-1).item()
     emotion = model.config.id2label[pred_id]
@@ -171,22 +147,31 @@ def classify_emotion(filepath, extractor, model):
 # MAIN LOOP
 ######################################################
 if __name__ == "__main__":
+    emotions = []
     counter = 1
-    while True:
-        audio = record_until_silence()
-        print(f"[DEBUG] record_until_silence() returned shape={audio.shape}")
 
-        if audio.size == 0:
-            print("No audio recorded. Continue listening...\n")
-            continue
+    try:
+        while True:
+            audio = record_until_silence()
+            if audio.size == 0:
+                print("No audio recorded. Continue listening...\n")
+                continue
 
-        filename = os.path.join(OUTPUT_DIR, f"recording_{counter}.wav")
-        save_audio(audio, filename)
-        predicted_emotion = classify_emotion(filename, extractor, model)
+            filename = os.path.join(OUTPUT_DIR, f"recording_{counter}.wav")
+            save_audio(audio, filename)
 
-        if predicted_emotion is not None:
-            print("Predicted emotion:", predicted_emotion)
-        else:
-            print("No emotion predicted.")
+            predicted_emotion = classify_emotion(filename, extractor, model)
+            if predicted_emotion is not None:
+                print("Predicted emotion:", predicted_emotion)
+                emotions.append(predicted_emotion)
+            else:
+                print("No emotion predicted.")
 
-        counter += 1
+            counter += 1
+
+    except KeyboardInterrupt:
+        print("\nExiting gracefully...")
+    finally:
+        print("All detected emotions collected during this session:")
+        print(emotions)
+        sys.exit(0)
