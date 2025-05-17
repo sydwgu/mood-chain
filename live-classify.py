@@ -99,6 +99,32 @@ def save_audio(audio: np.ndarray, filename: str):
     write(filename, SAMPLE_RATE, scaled)
     print(f"Saved: {filename}")
 
+
+def string_to_rgb(indexed_list):
+    """
+    Takes a list of string values and converts each to an assigned RGB value.
+    Returns a list of RGB tuples.
+    """
+    # Define your custom mapping
+    color_map = {
+        "sad": (0, 0, 255),          # Blue
+        "happy": (255, 255, 0),      # Yellow
+        "angry": (255, 0, 0),        # Red
+        "neutral": (255, 255, 255),  # White
+        "disgust": (0, 128, 0),      # Green
+        "fearful": (128, 0, 128),    # Purple
+        "surprised": (255, 165, 0),  # Orange
+        "calm": (64, 224, 208)       # Turquoise
+    }
+
+    rgb_values = []
+    for item in indexed_list:
+        rgb = color_map.get(item.lower(), (0, 0, 0))  # Default to black if not found
+        rgb_values.append(rgb)
+
+    return rgb_values
+
+
 def classify_emotion(filepath, extractor, model, max_duration=30.0):
     """
     Classify emotion using the same approach as your 'working' snippet:
