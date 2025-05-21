@@ -11,6 +11,7 @@ from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 import os
 import sys
 import librosa
+import json
 
 THRESHOLD = 0.09
 SILENCE_DURATION = 2.0
@@ -20,6 +21,7 @@ OUTPUT_DIR = "./recordings"
 DURATION_LIMIT = 30
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 
 # Load the Hugging Face Whisper-based audio classification model
 model_name = "firdhokk/speech-emotion-recognition-with-openai-whisper-large-v3"
@@ -169,6 +171,10 @@ def classify_emotion(filepath, extractor, model, max_duration=30.0):
     emotion = model.config.id2label[pred_id]
     return emotion
 
+
+# define json that live updates as emotions are detected
+file_path = os.path.join(os.path.dirname(__file__), "emotion_colors.json")
+
 ######################################################
 # MAIN LOOP
 ######################################################
@@ -190,6 +196,20 @@ if __name__ == "__main__":
             if predicted_emotion is not None:
                 print("Predicted emotion:", predicted_emotion)
                 emotions.append(predicted_emotion)
+
+                # convert emotion to associated rgb value
+                emotion_rgb = string_to_rgb(predicted_emotion)
+
+                # print out to updating json
+                color = {
+                    "r": emotion_rgb[0],
+                    "g": emotion_rgb[1],
+                    "b": emotion_rgb[2]
+                }
+
+                with open(file_path, "w") as f:
+                    json.dump(color, f)
+                
             else:
                 print("No emotion predicted.")
 
