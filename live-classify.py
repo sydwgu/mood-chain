@@ -13,7 +13,7 @@ import sys
 import librosa
 import json
 
-THRESHOLD = 0.09
+THRESHOLD = 0.025
 SILENCE_DURATION = 2.0
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -107,16 +107,16 @@ def string_to_rgb(indexed_list):
     Takes a list of string values and converts each to an assigned RGB value.
     Returns a list of RGB tuples.
     """
-    # Define your custom mapping
+    # custom mapping for emotions to colors
     color_map = {
-        "sad": (0, 0, 255),          # Blue
-        "happy": (255, 255, 0),      # Yellow
-        "angry": (255, 0, 0),        # Red
-        "neutral": (255, 255, 255),  # White
-        "disgust": (0, 128, 0),      # Green
-        "fearful": (128, 0, 128),    # Purple
-        "surprised": (255, 165, 0),  # Orange
-        "calm": (64, 224, 208)       # Turquoise
+        "sad": (124, 157, 222),      # Blue
+        "happy": (255, 242, 191),    # Yellow
+        "angry": (168, 68, 68),        # Red
+        "neutral": (245, 245, 245),  # White
+        "disgust": (160, 180, 145),      # Green
+        "fearful": (208, 190, 220),    # Purple
+        "surprised": (250, 195, 145),  # Orange
+        "calm": (188, 220, 205)       # Turquoise
     }
 
     rgb_values = []
@@ -198,7 +198,7 @@ if __name__ == "__main__":
                 emotions.append(predicted_emotion)
 
                 # convert emotion to associated rgb value
-                emotion_rgb = string_to_rgb(predicted_emotion)
+                emotion_rgb = string_to_rgb([predicted_emotion])[0]
 
                 # print out to updating json
                 color = {
