@@ -109,14 +109,14 @@ def string_to_rgb(indexed_list):
     """
     # custom mapping for emotions to colors
     color_map = {
-        "sad": (124, 157, 222),      # Blue
-        "happy": (255, 242, 191),    # Yellow
-        "angry": (168, 68, 68),        # Red
+        "sad": (75, 112, 188),      # Blue
+        "happy": (255, 235, 165),    # Yellow
+        "angry": (181, 42, 42),        # Red
         "neutral": (245, 245, 245),  # White
-        "disgust": (160, 180, 145),      # Green
-        "fearful": (208, 190, 220),    # Purple
+        "disgust": (105, 168, 100),      # Green
+        "fearful": (180, 140, 232),    # Purple
         "surprised": (250, 195, 145),  # Orange
-        "calm": (188, 220, 205)       # Turquoise
+        "calm": (150, 232, 195)       # Turquoise
     }
 
     rgb_values = []
