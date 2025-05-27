@@ -1,5 +1,5 @@
 # If needed, run:
-#   pip install sounddevice scipy torchaudio torch transformers soundfile librosa
+#   pip install sounddevice numpy scipy time torchaudio torch transformers soundfile librosa os sys json
 
 import sounddevice as sd
 import numpy as np
